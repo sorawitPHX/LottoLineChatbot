@@ -3,6 +3,37 @@
 
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
+
+// ─── Custom Logger for cPanel (Writes to passenger.log) ───────────────
+const logStream = fs.createWriteStream(path.join(__dirname, "passenger.log"), { flags: "a" });
+function logToFile(prefix, args) {
+  const time = new Date().toISOString();
+  const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : a)).join(" ");
+  logStream.write(`[${time}] ${prefix}: ${msg}\n`);
+}
+
+const originalLog = console.log;
+console.log = function(...args) {
+  logToFile("LOG", args);
+  originalLog.apply(console, args);
+};
+
+const originalError = console.error;
+console.error = function(...args) {
+  logToFile("ERR", args);
+  originalError.apply(console, args);
+};
+
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err.stack || err.message || err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+// ──────────────────────────────────────────────────────────────────────
+
 const express = require("express");
 const crypto = require("crypto");
 const { middleware: lineMiddleware } = require("@line/bot-sdk");
