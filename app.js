@@ -1,5 +1,5 @@
 // app.js — LINE Group Message Forwarder Bot (cPanel-compatible)
-// Entry point: Express server with LINE Webhook + test endpoints.
+// Entry po : Express server with LINE Webhook + test endpoints.
 
 require("dotenv").config();
 
@@ -19,16 +19,27 @@ const lineConfig = {
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
 
+// ─── App Configuration ────────────────────────────────────────────────
 // Base URL for the server (used to construct public image proxy URLs)
-// On cPanel, set BASE_URL in .env to your public domain, e.g., https://yourdomain.com
+// On cPanel, set BASE_URL in .env to your full public URL, e.g., https://bannasainamrod.ac.th/lottoapi
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 
+// Automatically extract the path component from BASE_URL to support subfolder deployments
+let BASE_PATH = "/";
+try {
+  const parsedUrl = new URL(BASE_URL);
+  BASE_PATH = parsedUrl.pathname;
+} catch (err) {
+  console.error("[Config] ⚠️ Invalid BASE_URL, fallback to /");
+}
+
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTES
+// ROUTES (Grouped via express.Router)
 // ═══════════════════════════════════════════════════════════════════════
+const mainRouter = express.Router();
 
 // ─── Health Check ──────────────────────────────────────────────────────
-app.get("/", (req, res) => {
+mainRouter.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "LottoLineChatbot",
@@ -38,7 +49,7 @@ app.get("/", (req, res) => {
 });
 
 // ─── Test: Google Sheets Config ────────────────────────────────────────
-app.get("/test/sheets", async (req, res) => {
+mainRouter.get("/test/sheets", async (req, res) => {
   try {
     const info = sheetHelper.getCacheInfo();
     if (info.loaded) {
@@ -65,7 +76,7 @@ app.get("/test/sheets", async (req, res) => {
 });
 
 // ─── Test: Force Reload Config ─────────────────────────────────────────
-app.get("/test/reload", async (req, res) => {
+mainRouter.get("/test/reload", async (req, res) => {
   try {
     const config = await sheetHelper.reloadConfig();
     res.json({
@@ -82,7 +93,7 @@ app.get("/test/reload", async (req, res) => {
 });
 
 // ─── Test: LINE Cache Stats ────────────────────────────────────────────
-app.get("/test/cache", (req, res) => {
+mainRouter.get("/test/cache", (req, res) => {
   const stats = lineHelper.getCacheStats();
   const sheetInfo = sheetHelper.getCacheInfo();
   res.json({
@@ -96,7 +107,7 @@ app.get("/test/cache", (req, res) => {
 });
 
 // ─── Test: Bot Status Overview ─────────────────────────────────────────
-app.get("/test/status", (req, res) => {
+mainRouter.get("/test/status", (req, res) => {
   const config = sheetHelper.getConfig();
   const stats = lineHelper.getCacheStats();
   res.json({
@@ -113,7 +124,7 @@ app.get("/test/status", (req, res) => {
 // LINE image messages require publicly accessible HTTPS URLs.
 // The LINE Content API (api-data.line.me) needs an Authorization header,
 // so we proxy it through our own server to serve as a public URL.
-app.get("/image/:messageId", async (req, res) => {
+mainRouter.get("/image/:messageId", async (req, res) => {
   const { messageId } = req.params;
   const { sig } = req.query;
 
@@ -137,7 +148,7 @@ app.get("/image/:messageId", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // LINE WEBHOOK
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/webhook", lineMiddleware(lineConfig), async (req, res) => {
+mainRouter.post("/webhook", lineMiddleware(lineConfig), async (req, res) => {
   // Immediately respond 200 OK to LINE Platform (avoid timeout)
   res.status(200).send("OK");
 
@@ -152,6 +163,12 @@ app.post("/webhook", lineMiddleware(lineConfig), async (req, res) => {
     }
   }
 });
+
+// ─── Mount Router ──────────────────────────────────────────────────────
+app.use("/", mainRouter);
+if (BASE_PATH !== "/") {
+  app.use(BASE_PATH, mainRouter);
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // EVENT HANDLER — Core Logic Flow (Hierarchical Evaluation)
@@ -424,11 +441,12 @@ async function startServer() {
   app.listen(PORT, () => {
     console.log("═══════════════════════════════════════════════");
     console.log(`🚀 LottoLineChatbot is running on port ${PORT}`);
-    console.log(`📡 Webhook URL: http://localhost:${PORT}/webhook`);
-    console.log(`🧪 Test Sheets: http://localhost:${PORT}/test/sheets`);
-    console.log(`🔄 Test Reload: http://localhost:${PORT}/test/reload`);
-    console.log(`📊 Test Cache:  http://localhost:${PORT}/test/cache`);
-    console.log(`📋 Test Status: http://localhost:${PORT}/test/status`);
+    console.log(`📌 Base Path: ${BASE_PATH}`);
+    console.log(`📡 Webhook URL: ${BASE_URL}/webhook`);
+    console.log(`🧪 Test Sheets: ${BASE_URL}/test/sheets`);
+    console.log(`🔄 Test Reload: ${BASE_URL}/test/reload`);
+    console.log(`📊 Test Cache:  ${BASE_URL}/test/cache`);
+    console.log(`📋 Test Status: ${BASE_URL}/test/status`);
     console.log("═══════════════════════════════════════════════");
   });
 }

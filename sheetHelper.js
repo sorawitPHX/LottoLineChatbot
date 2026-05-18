@@ -80,9 +80,9 @@ async function fetchConfig() {
   configCache = config;
   lastFetchedAt = new Date();
   console.log(`[SheetHelper] ✅ Config loaded at ${lastFetchedAt.toISOString()}`);
-  console.log(`[SheetHelper]    bot_status=${config.bot_status}, forward_mode=${config.forward_mode}`);
-  console.log(`[SheetHelper]    good_keywords=[${config.good_keywords.join(", ")}]`);
-  console.log(`[SheetHelper]    bad_keywords=[${config.bad_keywords.join(", ")}]`);
+  // console.log(`[SheetHelper]    bot_status=${config.bot_status}, forward_mode=${config.forward_mode}`);
+  // console.log(`[SheetHelper]    good_keywords=[${config.good_keywords.join(", ")}]`);
+  // console.log(`[SheetHelper]    bad_keywords=[${config.bad_keywords.join(", ")}]`);
 
   return config;
 }
@@ -137,7 +137,7 @@ function startAutoRefresh() {
 
   setInterval(async () => {
     try {
-      console.log("[SheetHelper] 🔄 Auto-refreshing config...");
+      // console.log("[SheetHelper] 🔄 Auto-refreshing config...");
       await fetchConfig();
     } catch (err) {
       console.error("[SheetHelper] ❌ Auto-refresh failed:", err.message);
