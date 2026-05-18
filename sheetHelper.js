@@ -4,7 +4,6 @@
 
 const { google } = require("googleapis");
 const path = require("path");
-const cron = require("node-cron");
 
 // ─── In-Memory Config Cache ────────────────────────────────────────────
 let configCache = null;
@@ -128,19 +127,24 @@ async function reloadConfig() {
 }
 
 /**
- * Start automatic refresh with node-cron.
- * Default: every 5 minutes.
+ * Start automatic refresh using setInterval.
+ * Interval is read from env REFRESH_INTERVAL_SEC (default: 300 = 5 minutes).
+ * Supports second-level granularity.
  */
-function startAutoRefresh(cronExpression = "*/5 * * * *") {
-  cron.schedule(cronExpression, async () => {
+function startAutoRefresh() {
+  const intervalSec = parseInt(process.env.REFRESH_INTERVAL_SEC, 10) || 300;
+  const intervalMs = intervalSec * 1000;
+
+  setInterval(async () => {
     try {
       console.log("[SheetHelper] 🔄 Auto-refreshing config...");
       await fetchConfig();
     } catch (err) {
       console.error("[SheetHelper] ❌ Auto-refresh failed:", err.message);
     }
-  });
-  console.log(`[SheetHelper] ⏰ Auto-refresh scheduled: ${cronExpression}`);
+  }, intervalMs);
+
+  console.log(`[SheetHelper] ⏰ Auto-refresh scheduled: every ${intervalSec} seconds`);
 }
 
 /**
