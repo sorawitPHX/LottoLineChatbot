@@ -1,0 +1,17 @@
+{
+  "name": "lotto-line-chatbot",
+  "version": "1.0.0",
+  "description": "LINE Group Message Forwarder Bot - Crawls messages from source groups, filters by Google Sheets config, and forwards to destination group.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^9.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "googleapis": "^146.0.0",
+    "node-cron": "^3.0.3"
+  }
+}
