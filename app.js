@@ -1,5 +1,5 @@
 // app.js — LINE Group Message Forwarder Bot (cPanel-compatible)
-// Entry po : Express server with LINE Webhook + test endpoints.
+// Entry point: Express server with LINE Webhook + test endpoints.
 
 require("dotenv").config();
 
@@ -15,13 +15,13 @@ function logToFile(prefix, args) {
 }
 
 const originalLog = console.log;
-console.log = function(...args) {
+console.log = function (...args) {
   logToFile("LOG", args);
   originalLog.apply(console, args);
 };
 
 const originalError = console.error;
-console.error = function(...args) {
+console.error = function (...args) {
   logToFile("ERR", args);
   originalError.apply(console, args);
 };
@@ -179,6 +179,18 @@ mainRouter.get("/image/:messageId", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // LINE WEBHOOK
 // ═══════════════════════════════════════════════════════════════════════
+
+// GET /webhook — For browser verification (LINE uses POST, not GET)
+mainRouter.get("/webhook", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Webhook endpoint is active. LINE Platform uses POST to send events here.",
+    method: "GET (browser test)",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// POST /webhook — Actual LINE webhook handler
 mainRouter.post("/webhook", lineMiddleware(lineConfig), async (req, res) => {
   // Immediately respond 200 OK to LINE Platform (avoid timeout)
   res.status(200).send("OK");
@@ -283,6 +295,71 @@ async function handleEvent(event) {
       ]);
       return; // TERMINATE
     }
+
+    // ─── Requirement 3: Admin Group Activate / Deactivate ────────────
+
+    // cmd_activate_admin
+    if (config && messageText === config.cmd_activate_admin) {
+      // Rule 1: Must be in a group
+      if (event.source.type !== "group") {
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: "❌ ไม่สามารถทำรายการได้ กรุณาพิมพ์คำสั่งนี้ในแชทกลุ่มเท่านั้น" },
+        ]);
+        return; // TERMINATE
+      }
+
+      // Rule 2: Activate this group as admin
+      try {
+        await sheetHelper.updateConfigValue("admin_group_id", groupId);
+        await sheetHelper.reloadConfig();
+
+        // Get group name for confirmation
+        const groupSummary = await lineHelper.getGroupSummary(groupId);
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: `✅ ตั้งค่ากลุ่ม "${groupSummary.groupName}" เป็นแชทกลาง (Admin Group) สำเร็จแล้ว!` },
+        ]);
+      } catch (err) {
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: `❌ ตั้งค่าไม่สำเร็จ: ${err.message}` },
+        ]);
+      }
+      return; // TERMINATE
+    }
+
+    // cmd_deactivate_admin
+    if (config && messageText === config.cmd_deactivate_admin) {
+      // Rule 1: Must be in a group
+      if (event.source.type !== "group") {
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: "❌ ไม่สามารถทำรายการได้ กรุณาพิมพ์คำสั่งนี้ในแชทกลุ่มเท่านั้น" },
+        ]);
+        return; // TERMINATE
+      }
+
+      // Rule 3: Check if this group is actually the current admin group
+      if (groupId !== config.admin_group_id) {
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: "❌ กลุ่มนี้ไม่ได้เป็นแชทกลางอยู่แล้ว" },
+        ]);
+        return; // TERMINATE
+      }
+
+      try {
+        // Get group name before deactivating
+        const groupSummary = await lineHelper.getGroupSummary(groupId);
+        await sheetHelper.updateConfigValue("admin_group_id", "");
+        await sheetHelper.reloadConfig();
+
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: `✅ ยกเลิก "${groupSummary.groupName}" เป็นแชทกลางสำเร็จแล้ว บอทจะหยุดส่งข้อความมาที่นี่` },
+        ]);
+      } catch (err) {
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: `❌ ยกเลิกไม่สำเร็จ: ${err.message}` },
+        ]);
+      }
+      return; // TERMINATE
+    }
   }
 
   // ─── Phase 2: Global Constraints ────────────────────────────────────
@@ -370,37 +447,47 @@ async function enrichAndForward(event, config) {
   const displayName = memberProfile.displayName;
 
   if (messageType === "text") {
+    // Requirement 1: Dynamic text formatting
     const text = event.message.text;
+    const lines = [];
+    if (config.show_text_group_name === "เปิด") lines.push(`📌: ${groupName}`);
+    if (config.show_text_display_name === "เปิด") lines.push(`👤: ${displayName}`);
+    lines.push(`💬:\n${text}`);
+
     await lineHelper.pushMessage(config.admin_group_id, [
-      {
-        type: "text",
-        text: `📌: ${groupName}\n👤: ${displayName}\n💬: ${text}`,
-      },
+      { type: "text", text: lines.join("\n") },
     ]);
+
   } else if (messageType === "image") {
+    // Requirement 2: Dynamic image formatting
     const messageId = event.message.id;
     const sig = generateImageSignature(messageId);
     const imageUrl = `${BASE_URL}/image/${messageId}?sig=${sig}`;
 
     console.log(`[Webhook] 🖼️ Image proxy URL: ${imageUrl}`);
 
-    // Step 1: Send text caption first (always works)
-    await lineHelper.pushMessage(config.admin_group_id, [
-      {
-        type: "text",
-        text: `📌 จากกลุ่ม: ${groupName}\n👤 ลูกค้า: ${displayName}\n🖼️ ส่งรูปภาพ`,
-      },
-    ]);
+    const messages = [];
 
-    // Step 2: Attempt to send the image separately
+    // Build caption if enabled
+    if (config.show_image_caption === "เปิด") {
+      const captionLines = [];
+      if (config.show_image_group_name === "เปิด") captionLines.push(`📌: ${groupName}`);
+      if (config.show_image_display_name === "เปิด") captionLines.push(`👤: ${displayName}`);
+      captionLines.push("🖼️ ส่งรูปภาพ");
+
+      messages.push({ type: "text", text: captionLines.join("\n") });
+    }
+
+    // Always include the image object
+    messages.push({
+      type: "image",
+      originalContentUrl: imageUrl,
+      previewImageUrl: imageUrl,
+    });
+
+    // Send all in one push (saves LINE quota: 1 request = up to 5 objects)
     try {
-      await lineHelper.pushMessage(config.admin_group_id, [
-        {
-          type: "image",
-          originalContentUrl: imageUrl,
-          previewImageUrl: imageUrl,
-        },
-      ]);
+      await lineHelper.pushMessage(config.admin_group_id, messages);
     } catch (imgErr) {
       console.error(`[Webhook] ❌ Image push failed, URL: ${imageUrl}`, imgErr.message);
     }

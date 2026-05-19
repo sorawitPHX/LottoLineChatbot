@@ -8,9 +8,10 @@ const path = require("path");
 // ─── In-Memory Config Cache ────────────────────────────────────────────
 let configCache = null;
 let lastFetchedAt = null;
+let cachedRows = null; // raw rows for row-index lookup when writing
 
 // ─── Google Sheets Auth (Service Account) ──────────────────────────────
-const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
+const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, "service-account.json");
 
 let sheetsClient = null;
@@ -54,6 +55,9 @@ async function fetchConfig() {
     throw new Error("Google Sheets returned empty data");
   }
 
+  // Store raw rows for row-index lookup when writing
+  cachedRows = rows;
+
   // Skip header row (row 0), parse key (col A) and value (col C)
   const raw = {};
   for (let i = 1; i < rows.length; i++) {
@@ -75,14 +79,23 @@ async function fetchConfig() {
     forward_mode: raw.forward_mode || "คัดกรอง",
     good_keywords: parseArray(raw.good_keywords),
     bad_keywords: parseArray(raw.bad_keywords),
+
+    // Requirement 1: Dynamic text formatting
+    show_text_group_name: raw.show_text_group_name || "เปิด",
+    show_text_display_name: raw.show_text_display_name || "เปิด",
+
+    // Requirement 2: Dynamic image formatting
+    show_image_caption: raw.show_image_caption || "เปิด",
+    show_image_group_name: raw.show_image_group_name || "เปิด",
+    show_image_display_name: raw.show_image_display_name || "เปิด",
+
+    // Requirement 3: Admin group commands
+    cmd_activate_admin: raw.cmd_activate_admin || "#admin.activate",
+    cmd_deactivate_admin: raw.cmd_deactivate_admin || "#admin.deactivate",
   };
 
   configCache = config;
   lastFetchedAt = new Date();
-  // console.log(`[SheetHelper] ✅ Config loaded at ${lastFetchedAt.toISOString()}`);
-  // console.log(`[SheetHelper]    bot_status=${config.bot_status}, forward_mode=${config.forward_mode}`);
-  // console.log(`[SheetHelper]    good_keywords=[${config.good_keywords.join(", ")}]`);
-  // console.log(`[SheetHelper]    bad_keywords=[${config.bad_keywords.join(", ")}]`);
 
   return config;
 }
@@ -122,8 +135,61 @@ function getCacheInfo() {
 async function reloadConfig() {
   configCache = null;
   lastFetchedAt = null;
+  cachedRows = null;
   sheetsClient = null; // Reset auth client too
   return fetchConfig();
+}
+
+/**
+ * Update a single config value in Google Sheets by key.
+ * Finds the row where column A matches the key, then writes newValue to column C.
+ * @param {string} key - The config key in column A (e.g., "admin_group_id")
+ * @param {string} newValue - The new value to write to column C
+ */
+async function updateConfigValue(key, newValue) {
+  const sheets = await getClient();
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+  if (!spreadsheetId) {
+    throw new Error("GOOGLE_SHEET_ID is not set in .env");
+  }
+
+  // Ensure we have rows data to find the row index
+  if (!cachedRows) {
+    await fetchConfig();
+  }
+
+  // Find row index (1-based in Sheets, row 0 = header)
+  let targetRowIndex = -1;
+  for (let i = 1; i < cachedRows.length; i++) {
+    const rowKey = (cachedRows[i][0] || "").trim();
+    if (rowKey === key) {
+      targetRowIndex = i + 1; // Sheets is 1-based
+      break;
+    }
+  }
+
+  if (targetRowIndex === -1) {
+    throw new Error(`Key "${key}" not found in Google Sheets`);
+  }
+
+  // Extract sheet name from GOOGLE_SHEET_RANGE (e.g., "ตั้งค่า!A:D" → "ตั้งค่า")
+  const fullRange = process.env.GOOGLE_SHEET_RANGE || "ตั้งค่า!A:D";
+  const sheetName = fullRange.split("!")[0];
+
+  // Write to column C of the target row
+  const updateRange = `${sheetName}!C${targetRowIndex}`;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: updateRange,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[newValue]],
+    },
+  });
+
+  console.log(`[SheetHelper] ✅ Updated key "${key}" to "${newValue}" at ${updateRange}`);
 }
 
 /**
@@ -166,4 +232,5 @@ module.exports = {
   getCacheInfo,
   reloadConfig,
   fetchConfig,
+  updateConfigValue,
 };
