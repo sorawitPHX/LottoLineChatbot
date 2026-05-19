@@ -2,9 +2,11 @@
 // Entry point: Express server with LINE Webhook + test endpoints.
 
 require("dotenv").config();
+process.env.TZ = "Asia/Bangkok";
 
 const fs = require("fs");
 const path = require("path");
+const cron = require("node-cron");
 
 // ─── Custom Logger for cPanel (Writes to passenger.log) ───────────────
 const logStream = fs.createWriteStream(path.join(__dirname, "passenger.log"), { flags: "a" });
@@ -68,6 +70,16 @@ try {
 
 // Image debounce: wait for more images from same user before sending
 const IMAGE_DEBOUNCE_MS = parseInt(process.env.IMAGE_DEBOUNCE_MS, 10) || 1500;
+
+// Data retention: how many days to keep uploaded images before auto-cleanup
+const IMAGE_RETENTION_DAYS = parseInt(process.env.IMAGE_RETENTION_DAYS, 10) || 15;
+
+// ─── Uploads Folder (Auto-Create) ──────────────────────────────────────
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  console.log("[Startup] 📁 Created uploads directory:", UPLOADS_DIR);
+}
 
 // ─── Image Buffer (Debounce) ───────────────────────────────────────────
 // Key: "groupId_userId"
@@ -219,6 +231,10 @@ mainRouter.post("/webhook", lineMiddleware(lineConfig), async (req, res) => {
   }
 });
 
+// ─── Static: Serve uploaded images publicly ───────────────────────────
+const uploadsRoute = BASE_PATH === "/" ? "/uploads" : BASE_PATH + "/uploads";
+app.use(uploadsRoute, express.static(UPLOADS_DIR));
+
 // ─── Mount Router ──────────────────────────────────────────────────────
 app.use("/", mainRouter);
 if (BASE_PATH !== "/") {
@@ -234,7 +250,7 @@ async function handleEvent(event) {
 
   const config = sheetHelper.getConfig();
 
-  config.admin_group_id = "Cab6570c73a5c719032f4ae9616bb0942";
+  // config.admin_group_id = "Cab6570c73a5c719032f4ae9616bb0942";
 
   const messageType = event.message.type;
   const messageText = messageType === "text" ? event.message.text : "";
@@ -471,13 +487,25 @@ async function handleEvent(event) {
 
   if (messageType === "image") {
     if (config.forward_image === "เปิด") {
-      // PASS — Buffer the image (debounce for multi-image sends)
+      // PASS — Download image from LINE, save locally, then buffer
       const messageId = event.message.id;
-      const sig = generateImageSignature(messageId);
-      const imageUrl = `${BASE_URL}/image/${messageId}?sig=${sig}`;
       console.log(`[Webhook] 🖼️ Image received | msgId: ${messageId} | from: ${groupId} | user: ${userId}`);
-      console.log(`[Webhook] 🖼️ Proxy URL: ${imageUrl}`);
-      bufferImage(groupId, userId, imageUrl, config);
+
+      try {
+        // Download image content from LINE API immediately
+        const { buffer } = await lineHelper.getMessageContent(messageId);
+        const fileName = `${messageId}.jpg`;
+        const filePath = path.join(UPLOADS_DIR, fileName);
+        await fs.promises.writeFile(filePath, buffer);
+        console.log(`[Webhook] 💾 Image saved: ${filePath} (${buffer.length} bytes)`);
+
+        // Build public URL pointing to our own hosted file
+        const imageUrl = `${BASE_URL}/uploads/${fileName}`;
+        console.log(`[Webhook] 🖼️ Public URL: ${imageUrl}`);
+        bufferImage(groupId, userId, imageUrl, config);
+      } catch (err) {
+        console.error(`[Webhook] ❌ Failed to download/save image ${messageId}:`, err.message);
+      }
       return;
     }
     console.log(`[Webhook] ⛔ Image dropped (forward_image=ปิด) | from: ${groupId}`);
@@ -550,8 +578,19 @@ async function enrichAndForward(event, config) {
   } else if (messageType === "image") {
     // Single image fallback (should not be reached due to buffer, but kept for safety)
     const messageId = event.message.id;
-    const sig = generateImageSignature(messageId);
-    const imageUrl = `${BASE_URL}/image/${messageId}?sig=${sig}`;
+    const fileName = `${messageId}.jpg`;
+    const filePath = path.join(UPLOADS_DIR, fileName);
+
+    // Check if already downloaded, otherwise download now
+    if (!fs.existsSync(filePath)) {
+      try {
+        const { buffer } = await lineHelper.getMessageContent(messageId);
+        await fs.promises.writeFile(filePath, buffer);
+      } catch (err) {
+        console.error(`[Forward] ❌ Failed to download image ${messageId}:`, err.message);
+      }
+    }
+    const imageUrl = `${BASE_URL}/uploads/${fileName}`;
     await flushImageBuffer(groupId, userId, [imageUrl], config);
   }
 }
@@ -729,6 +768,41 @@ function generateImageSignature(messageId) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// DATA RETENTION CRONJOB — Auto-cleanup old uploaded images
+// ═══════════════════════════════════════════════════════════════════════
+cron.schedule("0 2 * * *", async () => {
+  console.log("[Cron] 🧹 Starting image retention cleanup...");
+  try {
+    const files = await fs.promises.readdir(UPLOADS_DIR);
+    const now = Date.now();
+    const maxAgeMs = IMAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    let deletedCount = 0;
+
+    for (const file of files) {
+      try {
+        const filePath = path.join(UPLOADS_DIR, file);
+        const stat = await fs.promises.stat(filePath);
+        const ageMs = now - stat.mtime.getTime();
+
+        if (ageMs > maxAgeMs) {
+          await fs.promises.unlink(filePath);
+          deletedCount++;
+          console.log(`[Cron] 🗑️ Deleted expired image: ${file} (age: ${Math.floor(ageMs / 86400000)}d)`);
+        }
+      } catch (fileErr) {
+        console.error(`[Cron] ❌ Failed to process file ${file}:`, fileErr.message);
+      }
+    }
+
+    console.log(`[Cron] ✅ Cleanup complete. Deleted ${deletedCount}/${files.length} files.`);
+  } catch (err) {
+    console.error("[Cron] ❌ Retention cleanup failed:", err.message);
+  }
+}, {
+  timezone: "Asia/Bangkok",
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // SERVER STARTUP
 // ═══════════════════════════════════════════════════════════════════════
 async function startServer() {
@@ -745,6 +819,8 @@ async function startServer() {
     console.log(`🔄 Test Reload: ${BASE_URL}/test/reload`);
     console.log(`📊 Test Cache:  ${BASE_URL}/test/cache`);
     console.log(`📋 Test Status: ${BASE_URL}/test/status`);
+    console.log(`🖼️ Uploads Dir: ${UPLOADS_DIR}`);
+    console.log(`📅 Image Retention: ${IMAGE_RETENTION_DAYS} days`);
     console.log("═══════════════════════════════════════════════");
   });
 }
