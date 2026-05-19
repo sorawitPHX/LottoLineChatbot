@@ -64,6 +64,14 @@ try {
   console.error("[Config] ⚠️ Invalid BASE_URL, fallback to /");
 }
 
+// Image debounce: wait for more images from same user before sending
+const IMAGE_DEBOUNCE_MS = parseInt(process.env.IMAGE_DEBOUNCE_MS, 10) || 1500;
+
+// ─── Image Buffer (Debounce) ───────────────────────────────────────────
+// Key: "groupId_userId"
+// Value: { timer, imageUrls: [], groupId, userId, config }
+const imageBuffer = new Map();
+
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTES (Grouped via express.Router)
 // ═══════════════════════════════════════════════════════════════════════
@@ -198,6 +206,8 @@ mainRouter.post("/webhook", lineMiddleware(lineConfig), async (req, res) => {
   // Process events in background
   const events = req.body.events || [];
   // console.log('Got event', events)
+  // console.log(`Size of arrays ${events.length}`)
+  // console.log(events)
   for (const event of events) {
     try {
       await handleEvent(event);
@@ -392,8 +402,11 @@ async function handleEvent(event) {
 
   if (messageType === "image") {
     if (config.forward_image === "เปิด") {
-      // PASS — Forward the image
-      await enrichAndForward(event, config);
+      // PASS — Buffer the image (debounce for multi-image sends)
+      const messageId = event.message.id;
+      const sig = generateImageSignature(messageId);
+      const imageUrl = `${BASE_URL}/image/${messageId}?sig=${sig}`;
+      bufferImage(groupId, userId, imageUrl, config);
       return;
     }
     return; // DROP
@@ -459,37 +472,123 @@ async function enrichAndForward(event, config) {
     ]);
 
   } else if (messageType === "image") {
-    // Requirement 2: Dynamic image formatting
+    // Single image fallback (should not be reached due to buffer, but kept for safety)
     const messageId = event.message.id;
     const sig = generateImageSignature(messageId);
     const imageUrl = `${BASE_URL}/image/${messageId}?sig=${sig}`;
+    await flushImageBuffer(groupId, userId, [imageUrl], config);
+  }
+}
 
-    console.log(`[Webhook] 🖼️ Image proxy URL: ${imageUrl}`);
+// ═══════════════════════════════════════════════════════════════════════
+// Image Debounce Buffer
+// ═══════════════════════════════════════════════════════════════════════
 
-    const messages = [];
+/**
+ * Buffer an incoming image. If more images arrive from the same user
+ * within IMAGE_DEBOUNCE_MS, they are accumulated. When the timer fires,
+ * all buffered images are flushed in a single batch.
+ */
+function bufferImage(groupId, userId, imageUrl, config) {
+  const key = `${groupId}_${userId}`;
+  const existing = imageBuffer.get(key);
 
-    // Build caption if enabled
-    if (config.show_image_caption === "เปิด") {
-      const captionLines = [];
-      if (config.show_image_group_name === "เปิด") captionLines.push(`📌: ${groupName}`);
-      if (config.show_image_display_name === "เปิด") captionLines.push(`👤: ${displayName}`);
-      captionLines.push("🖼️ ส่งรูปภาพ");
+  if (existing) {
+    // More images from same user — accumulate and reset timer
+    clearTimeout(existing.timer);
+    existing.imageUrls.push(imageUrl);
+    existing.timer = setTimeout(() => {
+      const entry = imageBuffer.get(key);
+      imageBuffer.delete(key);
+      if (entry) {
+        flushImageBuffer(entry.groupId, entry.userId, entry.imageUrls, entry.config)
+          .catch(err => console.error("[ImageBuffer] ❌ Flush failed:", err.message));
+      }
+    }, IMAGE_DEBOUNCE_MS);
+    console.log(`[ImageBuffer] ➕ Accumulated image for ${key} (total: ${existing.imageUrls.length})`);
+  } else {
+    // First image from this user — start new buffer
+    const timer = setTimeout(() => {
+      const entry = imageBuffer.get(key);
+      imageBuffer.delete(key);
+      if (entry) {
+        flushImageBuffer(entry.groupId, entry.userId, entry.imageUrls, entry.config)
+          .catch(err => console.error("[ImageBuffer] ❌ Flush failed:", err.message));
+      }
+    }, IMAGE_DEBOUNCE_MS);
 
-      messages.push({ type: "text", text: captionLines.join("\n") });
-    }
-
-    // Always include the image object
-    messages.push({
-      type: "image",
-      originalContentUrl: imageUrl,
-      previewImageUrl: imageUrl,
+    imageBuffer.set(key, {
+      timer,
+      imageUrls: [imageUrl],
+      groupId,
+      userId,
+      config,
     });
+    console.log(`[ImageBuffer] 📸 New buffer started for ${key}`);
+  }
+}
 
-    // Send all in one push (saves LINE quota: 1 request = up to 5 objects)
+/**
+ * Flush all buffered images for a user.
+ * Chunks images into pushMessage calls respecting LINE's 5-object limit.
+ *
+ * If show_image_caption === "เปิด":
+ *   - Chunk 1: 1 Text + up to 4 Images = 5 objects max
+ *   - Chunk 2+: up to 5 Images each
+ * If show_image_caption === "ปิด":
+ *   - All chunks: up to 5 Images each
+ */
+async function flushImageBuffer(groupId, userId, imageUrls, config) {
+  const totalImages = imageUrls.length;
+  console.log(`[ImageBuffer] 🚀 Flushing ${totalImages} image(s) for ${groupId}_${userId}`);
+
+  // Fetch group name & user display name (with cache)
+  const [groupSummary, memberProfile] = await Promise.all([
+    lineHelper.getGroupSummary(groupId),
+    lineHelper.getGroupMemberProfile(groupId, userId),
+  ]);
+
+  const groupName = groupSummary.groupName;
+  const displayName = memberProfile.displayName;
+
+  // Build image message objects
+  const imageObjects = imageUrls.map(url => ({
+    type: "image",
+    originalContentUrl: url,
+    previewImageUrl: url,
+  }));
+
+  // Build chunks according to caption config
+  const chunks = [];
+  let startIndex = 0;
+
+  if (config.show_image_caption === "เปิด") {
+    // First chunk: 1 text caption + up to 4 images
+    const captionLines = [];
+    if (config.show_image_group_name === "เปิด") captionLines.push(`📌: ${groupName}`);
+    if (config.show_image_display_name === "เปิด") captionLines.push(`👤: ${displayName}`);
+    captionLines.push(`🖼️ ส่งรูปภาพ ${totalImages} รูป`);
+
+    const firstBatchImages = imageObjects.slice(0, 4); // max 4 images in first chunk
+    chunks.push([
+      { type: "text", text: captionLines.join("\n") },
+      ...firstBatchImages,
+    ]);
+    startIndex = 4;
+  }
+
+  // Remaining chunks: up to 5 images each (no caption)
+  for (let i = startIndex; i < imageObjects.length; i += 5) {
+    chunks.push(imageObjects.slice(i, i + 5));
+  }
+
+  // Send each chunk as a separate pushMessage
+  for (let i = 0; i < chunks.length; i++) {
     try {
-      await lineHelper.pushMessage(config.admin_group_id, messages);
-    } catch (imgErr) {
-      console.error(`[Webhook] ❌ Image push failed, URL: ${imageUrl}`, imgErr.message);
+      await lineHelper.pushMessage(config.admin_group_id, chunks[i]);
+      console.log(`[ImageBuffer] ✅ Chunk ${i + 1}/${chunks.length} sent (${chunks[i].length} objects)`);
+    } catch (err) {
+      console.error(`[ImageBuffer] ❌ Chunk ${i + 1}/${chunks.length} failed:`, err.message);
     }
   }
 }
