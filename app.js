@@ -306,6 +306,70 @@ async function handleEvent(event) {
       return; // TERMINATE
     }
 
+    // #sys.admin — Show current admin group ID (debug only)
+    if (config && config.debug_mode === "เปิด" && messageText === "#sys.admin") {
+      let adminText = "";
+      if (config.admin_group_id) {
+        try {
+          const adminGroup = await lineHelper.getGroupSummary(config.admin_group_id);
+          adminText = `🎯 Admin Group:\n📋 ID: ${config.admin_group_id}\n📝 ชื่อกลุ่ม: ${adminGroup.groupName}`;
+        } catch (e) {
+          adminText = `🎯 Admin Group:\n📋 ID: ${config.admin_group_id}\n📝 ชื่อกลุ่ม: (ไม่สามารถดึงชื่อได้)`;
+        }
+      } else {
+        adminText = "🎯 Admin Group: ยังไม่ได้ตั้งค่า (ค่าว่าง)";
+      }
+      await lineHelper.replyMessage(replyToken, [
+        { type: "text", text: adminText },
+      ]);
+      return; // TERMINATE
+    }
+
+    // #sys.quota — Show LINE messaging quota & usage (debug only)
+    if (config && config.debug_mode === "เปิด" && messageText === "#sys.quota") {
+      try {
+        const { quota, consumption } = await lineHelper.getMessageQuota();
+
+        const lines = ["📊 LINE Messaging Quota"];
+
+        // Quota info
+        if (quota) {
+          if (quota.type === "limited") {
+            lines.push(`📦 แพ็คเกจ: จำกัดจำนวน`);
+            lines.push(`🔢 Limit: ${quota.value.toLocaleString()} ข้อความ/เดือน`);
+          } else if (quota.type === "none") {
+            lines.push(`📦 แพ็คเกจ: ไม่จำกัด (Premium)`);
+          } else {
+            lines.push(`📦 แพ็คเกจ: ${quota.type || "ไม่ทราบ"}`);
+            if (quota.value) lines.push(`🔢 Limit: ${quota.value.toLocaleString()}`);
+          }
+        } else {
+          lines.push("📦 แพ็คเกจ: ไม่สามารถดึงข้อมูลได้");
+        }
+
+        // Consumption info
+        if (consumption) {
+          lines.push(`📤 ใช้ไปแล้ว: ${consumption.totalUsage.toLocaleString()} ข้อความ`);
+          if (quota && quota.type === "limited" && quota.value) {
+            const remaining = quota.value - consumption.totalUsage;
+            const pct = ((consumption.totalUsage / quota.value) * 100).toFixed(1);
+            lines.push(`📉 คงเหลือ: ${remaining.toLocaleString()} ข้อความ (${pct}% used)`);
+          }
+        } else {
+          lines.push("📤 ใช้ไปแล้ว: ไม่สามารถดึงข้อมูลได้");
+        }
+
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: lines.join("\n") },
+        ]);
+      } catch (err) {
+        await lineHelper.replyMessage(replyToken, [
+          { type: "text", text: `❌ ดึงข้อมูล Quota ไม่สำเร็จ: ${err.message}` },
+        ]);
+      }
+      return; // TERMINATE
+    }
+
     // ─── Requirement 3: Admin Group Activate / Deactivate ────────────
 
     // cmd_activate_admin

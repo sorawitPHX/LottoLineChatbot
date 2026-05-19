@@ -204,11 +204,56 @@ function getCacheStats() {
   };
 }
 
+/**
+ * Get LINE messaging quota and consumption for the current month.
+ * Calls two endpoints:
+ *   - GET /v2/bot/message/quota       → monthly limit info
+ *   - GET /v2/bot/message/quota/consumption → messages sent this month
+ * @returns {Promise<{quota: object, consumption: object}>}
+ */
+async function getMessageQuota() {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const fetchJson = (urlPath) => {
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: "api.line.me",
+        path: urlPath,
+        method: "GET",
+        headers,
+      };
+      const req = https.request(options, (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (e) {
+            reject(new Error(`Failed to parse response from ${urlPath}`));
+          }
+        });
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  };
+
+  const [quota, consumption] = await Promise.all([
+    fetchJson("/v2/bot/message/quota").catch(() => null),
+    fetchJson("/v2/bot/message/quota/consumption").catch(() => null),
+  ]);
+
+  return { quota, consumption };
+}
+
 module.exports = {
   getGroupSummary,
   getGroupMemberProfile,
   pushMessage,
   replyMessage,
   getMessageContent,
+  getMessageQuota,
   getCacheStats,
 };
