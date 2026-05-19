@@ -10,8 +10,10 @@ const path = require("path");
 const logStream = fs.createWriteStream(path.join(__dirname, "passenger.log"), { flags: "a" });
 function logToFile(prefix, args) {
   const time = new Date().toISOString();
-  const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : a)).join(" ");
-  logStream.write(`[${time}] ${prefix}: ${msg}\n`);
+  const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
+  // Escape newlines/tabs so each log entry stays on a single line in passenger.log
+  const safeLine = msg.replace(/\r\n/g, "\\r\\n").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+  logStream.write(`[${time}] ${prefix}: ${safeLine}\n`);
 }
 
 const originalLog = console.log;
@@ -231,6 +233,9 @@ async function handleEvent(event) {
   if (event.type !== "message") return;
 
   const config = sheetHelper.getConfig();
+
+  config.admin_group_id = "Cab6570c73a5c719032f4ae9616bb0942";
+
   const messageType = event.message.type;
   const messageText = messageType === "text" ? event.message.text : "";
   const groupId = event.source.groupId || "";
@@ -470,9 +475,12 @@ async function handleEvent(event) {
       const messageId = event.message.id;
       const sig = generateImageSignature(messageId);
       const imageUrl = `${BASE_URL}/image/${messageId}?sig=${sig}`;
+      console.log(`[Webhook] 🖼️ Image received | msgId: ${messageId} | from: ${groupId} | user: ${userId}`);
+      console.log(`[Webhook] 🖼️ Proxy URL: ${imageUrl}`);
       bufferImage(groupId, userId, imageUrl, config);
       return;
     }
+    console.log(`[Webhook] ⛔ Image dropped (forward_image=ปิด) | from: ${groupId}`);
     return; // DROP
   }
 
@@ -526,6 +534,10 @@ async function enrichAndForward(event, config) {
   if (messageType === "text") {
     // Requirement 1: Dynamic text formatting
     const text = event.message.text;
+    const preview = text.length > 50 ? text.substring(0, 50) + "..." : text;
+    console.log(`[Forward] 💬 Text | กลุ่ม: ${groupName} | จาก: ${displayName} | เนื้อหา: ${JSON.stringify(preview)}`);
+    console.log(`[Forward] 💬 → ส่งไป: ${config.admin_group_id}`);
+
     const lines = [];
     if (config.show_text_group_name === "เปิด") lines.push(`📌: ${groupName}`);
     if (config.show_text_display_name === "เปิด") lines.push(`👤: ${displayName}`);
@@ -604,7 +616,6 @@ function bufferImage(groupId, userId, imageUrl, config) {
  */
 async function flushImageBuffer(groupId, userId, imageUrls, config) {
   const totalImages = imageUrls.length;
-  console.log(`[ImageBuffer] 🚀 Flushing ${totalImages} image(s) for ${groupId}_${userId}`);
 
   // Fetch group name & user display name (with cache)
   const [groupSummary, memberProfile] = await Promise.all([
@@ -614,6 +625,10 @@ async function flushImageBuffer(groupId, userId, imageUrls, config) {
 
   const groupName = groupSummary.groupName;
   const displayName = memberProfile.displayName;
+
+  console.log(`[Forward] 🖼️ Image Flush | กลุ่ม: ${groupName} | จาก: ${displayName} | จำนวน: ${totalImages} รูป`);
+  console.log(`[Forward] 🖼️ → ส่งไป: ${config.admin_group_id}`);
+  imageUrls.forEach((url, i) => console.log(`[Forward] 🖼️   URL[${i + 1}]: ${url}`));
 
   // Build image message objects
   const imageObjects = imageUrls.map(url => ({
@@ -646,13 +661,15 @@ async function flushImageBuffer(groupId, userId, imageUrls, config) {
     chunks.push(imageObjects.slice(i, i + 5));
   }
 
+  console.log(`[Forward] 🖼️ แบ่งส่ง: ${chunks.length} chunk(s) | caption: ${config.show_image_caption}`);
+
   // Send each chunk as a separate pushMessage
   for (let i = 0; i < chunks.length; i++) {
     try {
       await lineHelper.pushMessage(config.admin_group_id, chunks[i]);
-      console.log(`[ImageBuffer] ✅ Chunk ${i + 1}/${chunks.length} sent (${chunks[i].length} objects)`);
+      console.log(`[Forward] ✅ Chunk ${i + 1}/${chunks.length} sent (${chunks[i].length} objects)`);
     } catch (err) {
-      console.error(`[ImageBuffer] ❌ Chunk ${i + 1}/${chunks.length} failed:`, err.message);
+      console.error(`[Forward] ❌ Chunk ${i + 1}/${chunks.length} failed:`, err.message);
     }
   }
 }
