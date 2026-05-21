@@ -11,7 +11,7 @@ const cron = require("node-cron");
 // ─── Custom Logger for cPanel (Writes to passenger.log) ───────────────
 const logStream = fs.createWriteStream(path.join(__dirname, "passenger.log"), { flags: "a" });
 function logToFile(prefix, args) {
-  const time = new Date().toISOString();
+  const time = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Bangkok", hour12: false }).replace(" ", "T");
   const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
   // Escape newlines/tabs so each log entry stays on a single line in passenger.log
   const safeLine = msg.replace(/\r\n/g, "\\r\\n").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
